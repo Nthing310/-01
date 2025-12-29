@@ -6,6 +6,8 @@ import { SymbolTableGenerator } from './compiler/symbolTable';
 import { TACGenerator } from './compiler/tac';
 import { TargetCodeGenerator } from './compiler/target';
 import { VirtualMachine } from './compiler/vm';
+import { GrammarAnalyzer, GrammarAnalysis } from './compiler/grammarAnalyzer';
+import { Optimizer, OptimizationLog } from './compiler/optimizer';
 import { Instruction, PCodeF } from './types';
 
 // Sample Code from PDF
@@ -33,9 +35,12 @@ end.`;
 const TAB_NAMES: Record<string, string> = {
   'console': '控制台',
   'tokens': '词法单元',
+  'grammar': 'LL(1) 分析表',
   'ast': '语法树',
   'symbol_table': '符号表',
-  'tac': '三地址码',
+  'stack_frame': '活动记录',
+  'tac': '四元式',
+  'optimization': '代码优化',
   'pcode': 'P-Code (目标代码)'
 };
 
@@ -292,6 +297,211 @@ const SymbolTableNode = ({ table }: { table: any }) => {
     );
 };
 
+// --- Stack Frame View Component ---
+const StackFrameView = ({ rootTable }: { rootTable: any }) => {
+    if (!rootTable) return <div className="text-gray-500 italic">未生成符号表，请先编译。</div>;
+
+    // Helper to flatten tables
+    const getAllTables = (table: any, list: any[] = []) => {
+        list.push(table);
+        table.children.forEach((c: any) => getAllTables(c, list));
+        return list;
+    };
+
+    const tables = getAllTables(rootTable);
+
+    return (
+        <div className="flex flex-col gap-6 pb-10">
+            {tables.map((table: any, idx: number) => {
+                // Determine Frame Items
+                const items: any[] = [];
+                
+                // 1. Parameters (Negative Offsets)
+                // Filter variables with negative address
+                const params = table.entries.filter((e: any) => e.kind === 'variable' && Number(e.addr) < 0);
+                params.sort((a: any, b: any) => Number(a.addr) - Number(b.addr));
+                
+                params.forEach((p: any) => {
+                    items.push({ offset: p.addr, role: 'Parameter', name: p.name, desc: `参数 ${p.name}` });
+                });
+
+                // 2. Header (0, 1, 2)
+                items.push({ offset: 0, role: 'Control Link', name: 'SL', desc: '静态链 (Static Link)' });
+                items.push({ offset: 1, role: 'Control Link', name: 'DL', desc: '动态链 (Dynamic Link)' });
+                items.push({ offset: 2, role: 'Return Addr', name: 'RA', desc: '返回地址 (Return Address)' });
+
+                // 3. Locals (Positive Offsets >= 3)
+                const locals = table.entries.filter((e: any) => e.kind === 'variable' && Number(e.addr) >= 3);
+                locals.sort((a: any, b: any) => Number(a.addr) - Number(b.addr));
+                
+                locals.forEach((l: any) => {
+                    items.push({ offset: l.addr, role: 'Local Var', name: l.name, desc: `局部变量 ${l.name}` });
+                });
+
+                return (
+                    <div key={idx} className="border border-gray-700 rounded bg-gray-900 overflow-hidden">
+                        <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 flex justify-between items-center">
+                            <h3 className="font-bold text-blue-400">
+                                {table.name === 'Global' ? '主程序 (Main Program)' : `过程: ${table.name}`}
+                            </h3>
+                            <div className="flex gap-2">
+                                <span className="text-xs text-gray-500 bg-gray-950 px-2 py-1 rounded">
+                                    层级 (Level): {table.level}
+                                </span>
+                            </div>
+                        </div>
+                        <div className="p-4 bg-[#1e1e1e]">
+                            <div className="text-xs text-gray-500 mb-2 italic">内存布局 (相对于基址 BP):</div>
+                            <table className="w-full text-sm border-collapse text-left">
+                                <thead>
+                                    <tr className="text-gray-500 border-b border-gray-700">
+                                        <th className="p-2 w-20 text-right">偏移 (Offset)</th>
+                                        <th className="p-2 w-32">类型 (Type)</th>
+                                        <th className="p-2 w-24">名称 (Name)</th>
+                                        <th className="p-2">描述 (Description)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {items.map((item, i) => (
+                                        <tr key={i} className={`border-b border-gray-800 hover:bg-gray-800/20 ${
+                                            item.role === 'Control Link' || item.role === 'Return Addr' ? 'bg-gray-800/30' : 
+                                            item.role === 'Parameter' ? 'bg-blue-900/10' : ''
+                                        }`}>
+                                            <td className="p-2 text-right font-mono text-gray-500">{item.offset}</td>
+                                            <td className={`p-2 font-bold ${
+                                                item.role === 'Parameter' ? 'text-blue-400' :
+                                                item.role.includes('Link') ? 'text-purple-400' :
+                                                item.role === 'Return Addr' ? 'text-red-400' : 'text-green-400'
+                                            }`}>{item.role}</td>
+                                            <td className="p-2 font-mono text-yellow-500">{item.name}</td>
+                                            <td className="p-2 text-gray-400 text-xs">{item.desc}</td>
+                                        </tr>
+                                    ))}
+                                    <tr className="border-b border-gray-800 border-dashed">
+                                        <td className="p-2 text-right font-mono text-gray-600">...</td>
+                                        <td className="p-2 text-gray-600 italic" colSpan={3}>临时变量区域 (Temporary Variables Area)</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+// --- Grammar View Component ---
+const GrammarView = ({ analysis }: { analysis: GrammarAnalysis }) => {
+    if (!analysis) return <div className="text-gray-500">正在分析文法...</div>;
+
+    const sortedNonTerminals = Array.from(analysis.nonTerminals).sort();
+    const sortedTerminals = Array.from(analysis.terminals).sort();
+    // Add $ to terminals for table view
+    const tableTerminals = [...sortedTerminals, '$'];
+
+    return (
+        <div className="flex flex-col gap-8 pb-10">
+            {/* FIRST & FOLLOW Sets */}
+            <div className="flex gap-4">
+                <div className="flex-1">
+                    <h3 className="text-blue-400 font-bold mb-2">FIRST 集</h3>
+                    <div className="border border-gray-700 rounded overflow-hidden">
+                        <table className="w-full text-xs text-left">
+                            <thead className="bg-gray-800 text-gray-400">
+                                <tr>
+                                    <th className="p-2">Non-Terminal</th>
+                                    <th className="p-2">FIRST Set</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sortedNonTerminals.map(nt => (
+                                    <tr key={nt} className="border-b border-gray-700/50 hover:bg-gray-800/50">
+                                        <td className="p-2 font-mono text-yellow-500">{nt}</td>
+                                        <td className="p-2 font-mono text-gray-300">
+                                            {'{ ' + Array.from(analysis.first[nt]).join(', ') + ' }'}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div className="flex-1">
+                    <h3 className="text-green-400 font-bold mb-2">FOLLOW 集</h3>
+                    <div className="border border-gray-700 rounded overflow-hidden">
+                        <table className="w-full text-xs text-left">
+                            <thead className="bg-gray-800 text-gray-400">
+                                <tr>
+                                    <th className="p-2">Non-Terminal</th>
+                                    <th className="p-2">FOLLOW Set</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sortedNonTerminals.map(nt => (
+                                    <tr key={nt} className="border-b border-gray-700/50 hover:bg-gray-800/50">
+                                        <td className="p-2 font-mono text-yellow-500">{nt}</td>
+                                        <td className="p-2 font-mono text-gray-300">
+                                            {'{ ' + Array.from(analysis.follow[nt]).join(', ') + ' }'}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            {/* Parsing Table */}
+            <div>
+                <h3 className="text-purple-400 font-bold mb-2">LL(1) 预测分析表</h3>
+                <div className="overflow-x-auto border border-gray-700 rounded">
+                    <table className="min-w-max text-xs text-left border-collapse">
+                        <thead className="bg-gray-800 text-gray-400 sticky top-0">
+                            <tr>
+                                <th className="p-2 border-r border-gray-600 sticky left-0 bg-gray-800 z-10">NT \ T</th>
+                                {tableTerminals.map(t => (
+                                    <th key={t} className="p-2 border-r border-gray-700 min-w-[60px] text-center font-mono">{t}</th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sortedNonTerminals.map(nt => (
+                                <tr key={nt} className="border-b border-gray-700/50 hover:bg-gray-800/30">
+                                    <td className="p-2 border-r border-gray-600 font-mono text-yellow-500 sticky left-0 bg-gray-900">{nt}</td>
+                                    {tableTerminals.map(t => {
+                                        const prods = analysis.table[nt][t];
+                                        return (
+                                            <td key={t} className="p-2 border-r border-gray-700/50 text-center font-mono text-gray-400 whitespace-nowrap">
+                                                {prods && prods.length > 0 ? (
+                                                    prods.map((p, i) => (
+                                                        <div key={i} className={prods.length > 1 ? "text-red-400" : "text-blue-300"}>
+                                                            {nt} &rarr; {p}
+                                                        </div>
+                                                    ))
+                                                ) : <span className="text-gray-700">-</span>}
+                                            </td>
+                                        );
+                                    })}
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            {/* Grammar Source */}
+             <div>
+                <h3 className="text-gray-500 font-bold mb-2 text-xs uppercase">Reference Grammar</h3>
+                <pre className="text-xs text-gray-600 bg-gray-950 p-4 rounded overflow-auto max-h-40">
+                    {analysis.grammarStr}
+                </pre>
+            </div>
+        </div>
+    );
+};
+
+
 // --- Main App ---
 
 function App() {
@@ -299,6 +509,7 @@ function App() {
   const [output, setOutput] = useState("");
   const [activeTab, setActiveTab] = useState("editor");
   const [artifacts, setArtifacts] = useState<any>({});
+  const [grammarAnalysis, setGrammarAnalysis] = useState<GrammarAnalysis | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [inputNeeded, setInputNeeded] = useState(false);
   
@@ -306,6 +517,12 @@ function App() {
   const resolveInput = useRef<(val: number) => void>(null);
 
   const log = (msg: string) => setOutput(prev => prev + msg);
+
+  // Initialize Grammar Analysis on Mount
+  useEffect(() => {
+    const analyzer = new GrammarAnalyzer();
+    setGrammarAnalysis(analyzer.getAnalysis());
+  }, []);
 
   const compile = async () => {
     setOutput("");
@@ -325,15 +542,26 @@ function App() {
       // 4. TAC
       const tacGen = new TACGenerator(symTable);
       tacGen.generate(ast);
+      
+      // 5. Optimization
+      const optimizer = new Optimizer();
+      const optimizedTAC = optimizer.optimize(tacGen.code);
 
-      // 5. P-Code (Target)
-      // Use the proper TargetCodeGenerator class instead of simplified inline logic
+      // 6. P-Code (Target) - Still using original TAC for safety/consistency with VM currently
+      // Note: If you want to run optimized code, swap tacGen.code with optimizedTAC below.
+      // For visualization purposes, we show both.
       const targetGen = new TargetCodeGenerator(symTable);
-      targetGen.generate(tacGen.code);
+      targetGen.generate(tacGen.code); 
       const instructions = targetGen.instructions;
 
       setArtifacts({
-        tokens, ast, symTable, tac: tacGen.code, instructions
+        tokens, 
+        ast, 
+        symTable, 
+        tac: tacGen.code, 
+        optimizedTac: optimizedTAC, 
+        optimizerLogs: optimizer.logs,
+        instructions
       });
       
       log("编译成功！\n");
@@ -417,12 +645,12 @@ function App() {
         {/* Output/Artifacts */}
         <div className="w-1/2 flex flex-col">
           {/* Tabs */}
-          <div className="flex bg-gray-800 border-b border-gray-700">
-            {['console', 'tokens', 'ast', 'symbol_table', 'tac', 'pcode'].map(tab => (
+          <div className="flex bg-gray-800 border-b border-gray-700 overflow-x-auto">
+            {['console', 'tokens', 'grammar', 'ast', 'symbol_table', 'stack_frame', 'tac', 'optimization', 'pcode'].map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
-                className={`px-4 py-2 text-xs uppercase font-semibold tracking-wider ${activeTab === tab ? 'bg-gray-700 text-white border-b-2 border-blue-500' : 'text-gray-500 hover:text-gray-300'}`}
+                className={`px-4 py-2 text-xs uppercase font-semibold tracking-wider whitespace-nowrap ${activeTab === tab ? 'bg-gray-700 text-white border-b-2 border-blue-500' : 'text-gray-500 hover:text-gray-300'}`}
               >
                 {TAB_NAMES[tab] || tab}
               </button>
@@ -473,6 +701,10 @@ function App() {
                  artifacts.symTable ? <SymbolTableNode table={artifacts.symTable} /> : <div className="text-gray-500 italic">未生成符号表</div>
             )}
 
+            {activeTab === 'stack_frame' && (
+                 <StackFrameView rootTable={artifacts.symTable} />
+            )}
+
             {activeTab === 'tac' && (
                 <table className="w-full text-left text-xs">
                     <thead>
@@ -498,6 +730,139 @@ function App() {
                 </table>
             )}
 
+            {activeTab === 'optimization' && (
+                <div className="flex flex-col gap-6">
+                    {/* Optimization Analysis Table */}
+                    <div className="border border-gray-700 bg-gray-900 rounded flex flex-col">
+                        <div className="px-4 py-3 border-b border-gray-700 bg-gray-800 flex justify-between items-center">
+                            <h3 className="font-bold text-blue-400 text-sm flex items-center gap-2">
+                                <span className="material-icons text-sm">analytics</span>
+                                优化分析报告 (Optimization Analysis)
+                            </h3>
+                            <span className="text-xs text-gray-500">
+                                共发现 {artifacts.optimizerLogs?.length || 0} 处优化
+                            </span>
+                        </div>
+                        <div className="overflow-auto max-h-60">
+                             <table className="w-full text-left text-xs border-collapse">
+                                <thead className="bg-gray-800 text-gray-400 sticky top-0 z-10">
+                                    <tr>
+                                        <th className="p-2 border-r border-gray-700 w-12 text-center">ID</th>
+                                        <th className="p-2 border-r border-gray-700 w-28">类型 (Type)</th>
+                                        <th className="p-2 border-r border-gray-700">优化原因 (Reason)</th>
+                                        <th className="p-2 w-1/3">变更对比 (Change)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {!artifacts.optimizerLogs || artifacts.optimizerLogs.length === 0 ? (
+                                        <tr><td colSpan={4} className="p-4 text-center text-gray-500 italic">无优化项 (No optimizations detected)</td></tr>
+                                    ) : (
+                                        artifacts.optimizerLogs.map((log: OptimizationLog, i: number) => (
+                                            <tr key={i} className="border-b border-gray-800 hover:bg-gray-800/30 group">
+                                                <td className="p-2 border-r border-gray-800 text-center font-mono text-gray-500">{log.id}</td>
+                                                <td className="p-2 border-r border-gray-800">
+                                                    <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                                        log.pass === 'Loop' 
+                                                            ? 'bg-purple-900/30 text-purple-400 border-purple-800' 
+                                                            : 'bg-blue-900/30 text-blue-400 border-blue-800'
+                                                    }`}>
+                                                        {log.pass === 'Loop' ? '循环优化 (Loop)' : '局部优化 (Local)'}
+                                                    </span>
+                                                </td>
+                                                <td className="p-2 border-r border-gray-800 text-gray-300">
+                                                    {log.description}
+                                                </td>
+                                                <td className="p-2 font-mono">
+                                                    <div className="flex flex-col gap-1">
+                                                        {log.original && (
+                                                            <div className="text-red-400 line-through decoration-red-500/50 opacity-70 text-[10px] truncate" title={log.original}>
+                                                                <span className="text-red-500/50 mr-1 select-none">BEFORE:</span>{log.original}
+                                                            </div>
+                                                        )}
+                                                        {log.optimized && (
+                                                            <div className="text-green-400 text-[11px] truncate" title={log.optimized}>
+                                                                <span className="text-green-500/50 mr-1 select-none">AFTER :</span>{log.optimized}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ))
+                                    )}
+                                </tbody>
+                             </table>
+                        </div>
+                    </div>
+
+                    {/* Side-by-Side Comparison */}
+                    <div className="flex gap-4 h-[500px]">
+                        {/* Before */}
+                        <div className="flex-1 flex flex-col border border-gray-700 rounded bg-gray-900">
+                            <div className="bg-gray-800 px-3 py-2 text-xs font-bold text-gray-400 border-b border-gray-700">原始三地址码 (Original TAC)</div>
+                            <div className="flex-1 overflow-auto p-0">
+                                <table className="w-full text-left text-xs border-collapse">
+                                    <thead className="sticky top-0 bg-gray-800 z-10">
+                                        <tr className="text-gray-500">
+                                            <th className="py-1 px-2 w-10">ID</th>
+                                            <th className="px-1">Code</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {artifacts.tac?.map((q: any) => (
+                                            <tr key={q.id} className="border-b border-gray-800 hover:bg-gray-800/50">
+                                                <td className="py-1 px-2 text-gray-600 font-mono border-r border-gray-800">{q.id}</td>
+                                                <td className="px-2 py-1 font-mono text-gray-400">
+                                                    <span className="text-purple-400 font-bold mr-2">{q.op}</span>
+                                                    {q.op === 'LABEL' ? <span className="text-yellow-400">{q.result}:</span> : 
+                                                    <>
+                                                        {q.result && <span className="text-yellow-300 mr-1">{q.result} :=</span>}
+                                                        <span className="text-gray-300 mr-1">{q.arg1}</span>
+                                                        <span className="text-gray-300">{q.arg2}</span>
+                                                    </>
+                                                    }
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        {/* After */}
+                        <div className="flex-1 flex flex-col border border-gray-700 rounded bg-gray-900">
+                            <div className="bg-gray-800 px-3 py-2 text-xs font-bold text-green-400 border-b border-gray-700">优化后三地址码 (Optimized TAC)</div>
+                            <div className="flex-1 overflow-auto p-0">
+                                <table className="w-full text-left text-xs border-collapse">
+                                    <thead className="sticky top-0 bg-gray-800 z-10">
+                                        <tr className="text-gray-500">
+                                            <th className="py-1 px-2 w-10">ID</th>
+                                            <th className="px-1">Code</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {artifacts.optimizedTac?.map((q: any) => (
+                                            <tr key={q.id} className="border-b border-gray-800 hover:bg-gray-800/50 bg-green-900/5">
+                                                <td className="py-1 px-2 text-gray-600 font-mono border-r border-gray-800">{q.id}</td>
+                                                <td className="px-2 py-1 font-mono text-gray-300">
+                                                    <span className="text-purple-400 font-bold mr-2">{q.op}</span>
+                                                    {q.op === 'LABEL' ? <span className="text-yellow-400">{q.result}:</span> : 
+                                                    <>
+                                                        {q.result && <span className="text-yellow-300 mr-1">{q.result} :=</span>}
+                                                        <span className="text-gray-300 mr-1">{q.arg1}</span>
+                                                        <span className="text-gray-300">{q.arg2}</span>
+                                                    </>
+                                                    }
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {activeTab === 'pcode' && (
                 <table className="w-full text-left text-xs">
                     <thead>
@@ -519,6 +884,10 @@ function App() {
                         ))}
                     </tbody>
                 </table>
+            )}
+
+            {activeTab === 'grammar' && grammarAnalysis && (
+                <GrammarView analysis={grammarAnalysis} />
             )}
           </div>
         </div>
