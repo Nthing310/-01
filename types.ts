@@ -3,11 +3,9 @@
 export enum TokenType {
   NULL, IDENT, NUMBER,
   PLUS, MINUS, TIMES, SLASH,
-  EQL, NEQ, LSS, LEQ, GTR, GEQ, BECOMES,
-  LPAREN, RPAREN, COMMA, SEMICOLON, PERIOD,
-  PROGRAM, CONST, VAR, PROCEDURE, BEGIN, END, ODD,
-  IF, THEN, ELSE, WHILE, DO,
-  CALL, READ, WRITE
+  EQL, NEQ, LSS, LEQ, GTR, GEQ, 
+  LPAREN, RPAREN, COMMA, SEMICOLON, PERIOD, BECOMES,
+  CONST, VAR, PROCEDURE, BEGIN, END, IF, THEN, WHILE, DO, CALL, ODD, READ, WRITE
 }
 
 export interface Token {
@@ -20,10 +18,10 @@ export interface Token {
 // --- AST Types ---
 export type ASTNode = 
   | ProgramNode | BlockNode | ConstDeclNode | VarDeclNode 
-  | ProcNode | BodyNode | StatementNode | ExpNode;
+  | ProcNode | StatementNode | ExpNode;
 
 export class ProgramNode {
-  constructor(public name: string, public block: BlockNode) {}
+  constructor(public block: BlockNode) {}
 }
 
 export class BlockNode {
@@ -31,7 +29,7 @@ export class BlockNode {
     public constDecl: ConstDeclNode | null,
     public varDecl: VarDeclNode | null,
     public procs: ProcNode[],
-    public body: BodyNode
+    public statement: StatementNode
   ) {}
 }
 
@@ -44,30 +42,30 @@ export class VarDeclNode {
 }
 
 export class ProcNode {
-  constructor(public name: string, public params: string[], public block: BlockNode) {}
-}
-
-export class BodyNode {
-  constructor(public statements: StatementNode[]) {}
+  constructor(public name: string, public block: BlockNode) {}
 }
 
 export type StatementNode = 
-  | AssignNode | IfNode | WhileNode | CallNode | ReadNode | WriteNode | BodyNode;
+  | AssignNode | CallNode | BeginEndNode | IfNode | WhileNode | ReadNode | WriteNode;
 
 export class AssignNode {
   constructor(public varName: string, public expr: ExpNode) {}
 }
 
+export class CallNode {
+  constructor(public procName: string) {}
+}
+
+export class BeginEndNode {
+  constructor(public statements: StatementNode[]) {}
+}
+
 export class IfNode {
-  constructor(public lexp: ExpNode, public thenStmt: StatementNode, public elseStmt: StatementNode | null) {}
+  constructor(public condition: ExpNode, public thenStmt: StatementNode) {}
 }
 
 export class WhileNode {
-  constructor(public lexp: ExpNode, public bodyStmt: StatementNode) {}
-}
-
-export class CallNode {
-  constructor(public procName: string, public args: ExpNode[]) {}
+  constructor(public condition: ExpNode, public doStmt: StatementNode) {}
 }
 
 export class ReadNode {
@@ -78,7 +76,7 @@ export class WriteNode {
   constructor(public exprs: ExpNode[]) {}
 }
 
-export type ExpNode = BinOpNode | OddNode | NumNode | VarNode | ParenNode;
+export type ExpNode = BinOpNode | OddNode | NumNode | VarNode;
 
 export class BinOpNode {
   constructor(public op: string, public left: ExpNode, public right: ExpNode) {}
@@ -96,10 +94,6 @@ export class VarNode {
   constructor(public name: string) {}
 }
 
-export class ParenNode {
-  constructor(public expr: ExpNode) {}
-}
-
 // --- Symbol Table Types ---
 export class SymbolEntry {
   constructor(
@@ -107,8 +101,7 @@ export class SymbolEntry {
     public kind: 'constant' | 'variable' | 'procedure',
     public valLevel: number, // value for const, level for others
     public addr: number | string, // offset for var, address/label for proc
-    public size: number,
-    public numParams: number = 0
+    public size: number
   ) {}
 }
 

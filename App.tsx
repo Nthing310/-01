@@ -3,43 +3,44 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Lexer } from './compiler/lexer';
 import { Parser } from './compiler/parser';
 import { SymbolTableGenerator } from './compiler/symbolTable';
-import { TACGenerator } from './compiler/tac';
+import { TACGenerator, TRANSLATION_SCHEME_DEF } from './compiler/tac';
 import { TargetCodeGenerator } from './compiler/target';
 import { VirtualMachine } from './compiler/vm';
 import { GrammarAnalyzer, GrammarAnalysis } from './compiler/grammarAnalyzer';
 import { Optimizer, OptimizationLog } from './compiler/optimizer';
 import { Instruction, PCodeF } from './types';
 
-// Sample Code from PDF
-const DEFAULT_CODE = `program example;
-const m:=7,n:=85;
-var x,y,z,q,r;
-procedure multiply(x,y);
-var a,b;
+// Sample PL/0 Code
+const DEFAULT_CODE = `const m = 7, n = 85;
+var x, y, z, q, r;
+
+procedure multiply;
+var a, b;
 begin
-  a:=x; b:=y; z:=0;
-  while b>0 do
+  a := x; b := y; z := 0;
+  while b > 0 do
   begin
-    if odd b then z:=z+a;
-    a:=2*a; b:=b/2
+    if odd b then z := z + a;
+    a := 2 * a;
+    b := b / 2;
   end;
-  write(z)
 end;
 
 begin
-  x:=m; y:=n;
-  call multiply(x,y);
-  write(x)
+  x := m; y := n;
+  call multiply;
+  write(z);
 end.`;
 
 const TAB_NAMES: Record<string, string> = {
   'console': '控制台',
   'tokens': '词法单元',
-  'grammar': 'LL(1) 分析表',
+  'grammar': '文法定义',
   'ast': '语法树',
   'symbol_table': '符号表',
+  'label_table': '标号表',
   'stack_frame': '活动记录',
-  'tac': '四元式',
+  'tac': '语义分析 (Translation Scheme)',
   'optimization': '代码优化',
   'pcode': 'P-Code (目标代码)'
 };
@@ -169,15 +170,13 @@ const transformToTree = (node: any, keyName?: string): TreeData | null => {
     details.push(node.varName);
     children.push(transformToTree(node.expr, 'expr')!);
   } else if (type === 'IfNode') {
-    children.push(transformToTree(node.lexp, 'cond')!);
+    children.push(transformToTree(node.condition, 'cond')!);
     children.push(transformToTree(node.thenStmt, 'then')!);
-    if(node.elseStmt) children.push(transformToTree(node.elseStmt, 'else')!);
   } else if (type === 'WhileNode') {
-    children.push(transformToTree(node.lexp, 'cond')!);
-    children.push(transformToTree(node.bodyStmt, 'do')!);
+    children.push(transformToTree(node.condition, 'cond')!);
+    children.push(transformToTree(node.doStmt, 'do')!);
   } else if (type === 'CallNode') {
     details.push(node.procName);
-    if(node.args.length > 0) children.push(transformToTree(node.args, 'args')!);
   } else {
      // Generic object walker
      Object.keys(node).forEach(key => {
@@ -204,7 +203,7 @@ const transformToTree = (node: any, keyName?: string): TreeData | null => {
   return { label, details, children };
 };
 
-const TreeNodeRenderer = ({ node }: { node: TreeData }) => {
+const TreeNodeRenderer: React.FC<{ node: TreeData }> = ({ node }) => {
   return (
     <li>
       <div className="tf-node">
@@ -242,7 +241,7 @@ const ASTGraphViewer = ({ ast }: { ast: any }) => {
   );
 };
 
-const SymbolTableNode = ({ table }: { table: any }) => {
+const SymbolTableNode: React.FC<{ table: any }> = ({ table }) => {
     return (
         <div className="mb-6 border border-gray-700 rounded bg-gray-800/50 overflow-hidden">
             <div className="bg-gray-800 p-2 border-b border-gray-700 flex justify-between items-center">
@@ -262,12 +261,11 @@ const SymbolTableNode = ({ table }: { table: any }) => {
                             <th className="py-2 px-2">值/层级 (Val/L)</th>
                             <th className="py-2 px-2">地址 (Addr)</th>
                             <th className="py-2 px-2">大小 (Size)</th>
-                            <th className="py-2 px-2">参数 (Params)</th>
                         </tr>
                     </thead>
                     <tbody>
                         {table.entries.length === 0 ? (
-                            <tr><td colSpan={6} className="text-center py-4 text-gray-600 italic">此作用域无符号</td></tr>
+                            <tr><td colSpan={5} className="text-center py-4 text-gray-600 italic">此作用域无符号</td></tr>
                         ) : (
                             table.entries.map((e: any, i: number) => (
                                 <tr key={i} className="border-b border-gray-700/30 hover:bg-gray-700/20">
@@ -276,7 +274,6 @@ const SymbolTableNode = ({ table }: { table: any }) => {
                                     <td className="py-1.5 px-2">{e.valLevel}</td>
                                     <td className="py-1.5 px-2 font-mono text-yellow-500">{e.addr}</td>
                                     <td className="py-1.5 px-2">{e.size}</td>
-                                    <td className="py-1.5 px-2">{e.numParams || '-'}</td>
                                 </tr>
                             ))
                         )}
@@ -301,7 +298,6 @@ const SymbolTableNode = ({ table }: { table: any }) => {
 const StackFrameView = ({ rootTable }: { rootTable: any }) => {
     if (!rootTable) return <div className="text-gray-500 italic">未生成符号表，请先编译。</div>;
 
-    // Helper to flatten tables
     const getAllTables = (table: any, list: any[] = []) => {
         list.push(table);
         table.children.forEach((c: any) => getAllTables(c, list));
@@ -312,32 +308,21 @@ const StackFrameView = ({ rootTable }: { rootTable: any }) => {
 
     return (
         <div className="flex flex-col gap-6 pb-10">
+            <div className="bg-gray-800 p-3 rounded border border-gray-700 mb-2">
+                <p className="text-gray-400 text-xs">
+                    活动记录 (Activation Record) 展示。包含：动态链(Old SP)、返回地址、静态链、参数个数、形式参数及局部变量。
+                    由于标准 PL/0 无参数，参数部分显示为 0 或空。值列展示了静态偏移或默认值。
+                </p>
+            </div>
             {tables.map((table: any, idx: number) => {
-                // Determine Frame Items
-                const items: any[] = [];
-                
-                // 1. Parameters (Negative Offsets)
-                // Filter variables with negative address
-                const params = table.entries.filter((e: any) => e.kind === 'variable' && Number(e.addr) < 0);
-                params.sort((a: any, b: any) => Number(a.addr) - Number(b.addr));
-                
-                params.forEach((p: any) => {
-                    items.push({ offset: p.addr, role: 'Parameter', name: p.name, desc: `参数 ${p.name}` });
-                });
-
-                // 2. Header (0, 1, 2)
-                items.push({ offset: 0, role: 'Control Link', name: 'SL', desc: '静态链 (Static Link)' });
-                items.push({ offset: 1, role: 'Control Link', name: 'DL', desc: '动态链 (Dynamic Link)' });
-                items.push({ offset: 2, role: 'Return Addr', name: 'RA', desc: '返回地址 (Return Address)' });
-
-                // 3. Locals (Positive Offsets >= 3)
+                // Collect Items
                 const locals = table.entries.filter((e: any) => e.kind === 'variable' && Number(e.addr) >= 3);
                 locals.sort((a: any, b: any) => Number(a.addr) - Number(b.addr));
                 
-                locals.forEach((l: any) => {
-                    items.push({ offset: l.addr, role: 'Local Var', name: l.name, desc: `局部变量 ${l.name}` });
-                });
-
+                // Construct strictly ordered list as requested: DL, RA, SL, Count, Params
+                // Note: Standard PL/0 Stack: 0: SL, 1: DL, 2: RA. 
+                // We display them in the conceptual order requested.
+                
                 return (
                     <div key={idx} className="border border-gray-700 rounded bg-gray-900 overflow-hidden">
                         <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 flex justify-between items-center">
@@ -345,42 +330,51 @@ const StackFrameView = ({ rootTable }: { rootTable: any }) => {
                                 {table.name === 'Global' ? '主程序 (Main Program)' : `过程: ${table.name}`}
                             </h3>
                             <div className="flex gap-2">
-                                <span className="text-xs text-gray-500 bg-gray-950 px-2 py-1 rounded">
-                                    层级 (Level): {table.level}
-                                </span>
+                                <span className="text-xs text-gray-500 bg-gray-950 px-2 py-1 rounded">Level: {table.level}</span>
                             </div>
                         </div>
-                        <div className="p-4 bg-[#1e1e1e]">
-                            <div className="text-xs text-gray-500 mb-2 italic">内存布局 (相对于基址 BP):</div>
+                        <div className="p-0">
                             <table className="w-full text-sm border-collapse text-left">
                                 <thead>
-                                    <tr className="text-gray-500 border-b border-gray-700">
-                                        <th className="p-2 w-20 text-right">偏移 (Offset)</th>
-                                        <th className="p-2 w-32">类型 (Type)</th>
-                                        <th className="p-2 w-24">名称 (Name)</th>
-                                        <th className="p-2">描述 (Description)</th>
+                                    <tr className="text-gray-500 border-b border-gray-700 bg-gray-800/50">
+                                        <th className="p-2 w-32 border-r border-gray-800">项目 (Item)</th>
+                                        <th className="p-2 w-24 border-r border-gray-800">值 (Value)</th>
+                                        <th className="p-2">说明 (Description)</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {items.map((item, i) => (
-                                        <tr key={i} className={`border-b border-gray-800 hover:bg-gray-800/20 ${
-                                            item.role === 'Control Link' || item.role === 'Return Addr' ? 'bg-gray-800/30' : 
-                                            item.role === 'Parameter' ? 'bg-blue-900/10' : ''
-                                        }`}>
-                                            <td className="p-2 text-right font-mono text-gray-500">{item.offset}</td>
-                                            <td className={`p-2 font-bold ${
-                                                item.role === 'Parameter' ? 'text-blue-400' :
-                                                item.role.includes('Link') ? 'text-purple-400' :
-                                                item.role === 'Return Addr' ? 'text-red-400' : 'text-green-400'
-                                            }`}>{item.role}</td>
-                                            <td className="p-2 font-mono text-yellow-500">{item.name}</td>
-                                            <td className="p-2 text-gray-400 text-xs">{item.desc}</td>
+                                    <tr className="border-b border-gray-800 hover:bg-gray-800/20">
+                                        <td className="p-2 font-bold text-purple-400 border-r border-gray-800">动态链 (DL)</td>
+                                        <td className="p-2 font-mono text-white border-r border-gray-800">Stack[B+1]</td>
+                                        <td className="p-2 text-gray-500 text-xs">Old SP / 调用者基址</td>
+                                    </tr>
+                                    <tr className="border-b border-gray-800 hover:bg-gray-800/20">
+                                        <td className="p-2 font-bold text-red-400 border-r border-gray-800">返回地址 (RA)</td>
+                                        <td className="p-2 font-mono text-white border-r border-gray-800">Stack[B+2]</td>
+                                        <td className="p-2 text-gray-500 text-xs">Return Address (P)</td>
+                                    </tr>
+                                    <tr className="border-b border-gray-800 hover:bg-gray-800/20">
+                                        <td className="p-2 font-bold text-purple-400 border-r border-gray-800">静态链 (SL)</td>
+                                        <td className="p-2 font-mono text-white border-r border-gray-800">Stack[B]</td>
+                                        <td className="p-2 text-gray-500 text-xs">定义者基址 (用于访问外层变量)</td>
+                                    </tr>
+                                    <tr className="border-b border-gray-800 hover:bg-gray-800/20 bg-yellow-900/10">
+                                        <td className="p-2 font-bold text-yellow-400 border-r border-gray-800">参数个数</td>
+                                        <td className="p-2 font-mono text-white border-r border-gray-800">0</td>
+                                        <td className="p-2 text-gray-500 text-xs">Parameter Count (PL/0 标准无参)</td>
+                                    </tr>
+                                    <tr className="border-b border-gray-800 hover:bg-gray-800/20 bg-yellow-900/10">
+                                        <td className="p-2 font-bold text-yellow-400 border-r border-gray-800">形式参数</td>
+                                        <td className="p-2 font-mono text-white border-r border-gray-800">(None)</td>
+                                        <td className="p-2 text-gray-500 text-xs">Formal Parameters</td>
+                                    </tr>
+                                    {locals.map((l: any, i: number) => (
+                                        <tr key={i} className="border-b border-gray-800 hover:bg-gray-800/20">
+                                            <td className="p-2 font-bold text-green-400 border-r border-gray-800">局部变量 {l.name}</td>
+                                            <td className="p-2 font-mono text-gray-400 border-r border-gray-800">Offset {l.addr}</td>
+                                            <td className="p-2 text-gray-500 text-xs">Local Variable</td>
                                         </tr>
                                     ))}
-                                    <tr className="border-b border-gray-800 border-dashed">
-                                        <td className="p-2 text-right font-mono text-gray-600">...</td>
-                                        <td className="p-2 text-gray-600 italic" colSpan={3}>临时变量区域 (Temporary Variables Area)</td>
-                                    </tr>
                                 </tbody>
                             </table>
                         </div>
@@ -391,95 +385,113 @@ const StackFrameView = ({ rootTable }: { rootTable: any }) => {
     );
 }
 
-// --- Grammar View Component ---
-const GrammarView = ({ analysis }: { analysis: GrammarAnalysis }) => {
-    if (!analysis) return <div className="text-gray-500">正在分析文法...</div>;
+// --- P-Code View Component ---
+const PCodeView = ({ instructions }: { instructions: any[] }) => {
+    return (
+        <div className="flex flex-col gap-4">
+            <div className="bg-gray-800 p-3 rounded border border-gray-700 mb-2">
+            <p className="text-gray-400 text-xs">P-Code 是栈式虚拟机的指令集。</p>
+            </div>
+            <table className="w-full text-left text-xs">
+                <thead>
+                    <tr className="border-b border-gray-700 text-gray-500">
+                        <th className="py-2 w-16">地址 (PC)</th>
+                        <th className="py-2">指令 (F)</th>
+                        <th className="py-2">层差 (L)</th>
+                        <th className="py-2">参数 (A)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {instructions && instructions.length > 0 ? (
+                        instructions.map((inst: any, i: number) => {
+                            return (
+                                <tr key={i} className="border-b border-gray-800 font-mono hover:bg-gray-800">
+                                    <td className="py-2 px-2 text-gray-600">
+                                        {i}
+                                    </td>
+                                    <td className={`py-2 font-bold ${
+                                        ['CAL', 'RET'].includes(inst.f) ? 'text-purple-400' :
+                                        ['JMP', 'JPC'].includes(inst.f) ? 'text-yellow-400' :
+                                        ['LOD', 'STO'].includes(inst.f) ? 'text-blue-400' : 'text-green-400'
+                                    }`}>{inst.f}</td>
+                                    <td className="py-2 text-gray-400">{inst.l}</td>
+                                    <td className="py-2 text-gray-300">{inst.a}</td>
+                                </tr>
+                            );
+                        })
+                    ) : (
+                        <tr><td colSpan={4} className="py-4 text-center text-gray-600 italic">请先点击编译生成代码</td></tr>
+                    )}
+                </tbody>
+            </table>
+        </div>
+    );
+};
 
-    const sortedNonTerminals = Array.from(analysis.nonTerminals).sort();
-    const sortedTerminals = Array.from(analysis.terminals).sort();
-    // Add $ to terminals for table view
-    const tableTerminals = [...sortedTerminals, '$'];
+// --- Grammar View Component ---
+const GrammarView: React.FC<{ analysis: GrammarAnalysis }> = ({ analysis }) => {
+    const tableTerminals = (Array.from(analysis.terminals) as string[]).filter(t => t !== 'ε').sort();
+    tableTerminals.push('$');
+    const tableNonTerminals = (Array.from(analysis.nonTerminals) as string[]).sort();
 
     return (
         <div className="flex flex-col gap-8 pb-10">
-            {/* FIRST & FOLLOW Sets */}
-            <div className="flex gap-4">
-                <div className="flex-1">
-                    <h3 className="text-blue-400 font-bold mb-2">FIRST 集</h3>
-                    <div className="border border-gray-700 rounded overflow-hidden">
-                        <table className="w-full text-xs text-left">
-                            <thead className="bg-gray-800 text-gray-400">
-                                <tr>
-                                    <th className="p-2">Non-Terminal</th>
-                                    <th className="p-2">FIRST Set</th>
+            <div className="border border-gray-700 rounded bg-gray-900 overflow-hidden">
+                <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 font-bold text-blue-400">文法定义 (Grammar)</div>
+                <pre className="p-4 text-xs font-mono text-gray-300 whitespace-pre-wrap leading-relaxed">{analysis.grammarStr}</pre>
+            </div>
+            
+            {/* First & Follow */}
+            <div className="border border-gray-700 rounded bg-gray-900 overflow-hidden">
+                <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 font-bold text-yellow-400">First & Follow 集合</div>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                        <thead>
+                            <tr className="border-b border-gray-700 text-gray-500">
+                                <th className="p-2 border-r border-gray-800 w-32">Non-Terminal</th>
+                                <th className="p-2 border-r border-gray-800">First</th>
+                                <th className="p-2">Follow</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {Object.keys(analysis.first).map((nt) => (
+                                <tr key={nt} className="border-b border-gray-800 hover:bg-gray-800/30">
+                                    <td className="p-2 border-r border-gray-800 font-bold text-gray-300">{nt}</td>
+                                    <td className="p-2 border-r border-gray-800 font-mono text-green-300">{'{ ' + Array.from(analysis.first[nt]).join(', ') + ' }'}</td>
+                                    <td className="p-2 font-mono text-blue-300">{'{ ' + Array.from(analysis.follow[nt]).join(', ') + ' }'}</td>
                                 </tr>
-                            </thead>
-                            <tbody>
-                                {sortedNonTerminals.map(nt => (
-                                    <tr key={nt} className="border-b border-gray-700/50 hover:bg-gray-800/50">
-                                        <td className="p-2 font-mono text-yellow-500">{nt}</td>
-                                        <td className="p-2 font-mono text-gray-300">
-                                            {'{ ' + Array.from(analysis.first[nt]).join(', ') + ' }'}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                <div className="flex-1">
-                    <h3 className="text-green-400 font-bold mb-2">FOLLOW 集</h3>
-                    <div className="border border-gray-700 rounded overflow-hidden">
-                        <table className="w-full text-xs text-left">
-                            <thead className="bg-gray-800 text-gray-400">
-                                <tr>
-                                    <th className="p-2">Non-Terminal</th>
-                                    <th className="p-2">FOLLOW Set</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedNonTerminals.map(nt => (
-                                    <tr key={nt} className="border-b border-gray-700/50 hover:bg-gray-800/50">
-                                        <td className="p-2 font-mono text-yellow-500">{nt}</td>
-                                        <td className="p-2 font-mono text-gray-300">
-                                            {'{ ' + Array.from(analysis.follow[nt]).join(', ') + ' }'}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
+                            ))}
+                        </tbody>
+                    </table>
                 </div>
             </div>
-
-            {/* Parsing Table */}
-            <div>
-                <h3 className="text-purple-400 font-bold mb-2">LL(1) 预测分析表</h3>
-                <div className="overflow-x-auto border border-gray-700 rounded">
-                    <table className="min-w-max text-xs text-left border-collapse">
-                        <thead className="bg-gray-800 text-gray-400 sticky top-0">
+            
+            {/* 预测分析表 - Moved below First/Follow as requested */}
+            <div className="border border-gray-700 rounded bg-gray-900 overflow-hidden flex flex-col">
+                <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 font-bold text-green-400">预测分析表 (Predictive Parsing Table)</div>
+                <div className="overflow-auto max-h-[500px]">
+                    <table className="w-full text-left text-xs border-collapse">
+                            <thead className="bg-gray-800 sticky top-0 z-10">
                             <tr>
-                                <th className="p-2 border-r border-gray-600 sticky left-0 bg-gray-800 z-10">NT \ T</th>
+                                <th className="p-2 border border-gray-700 w-24">M [ A, a ]</th>
                                 {tableTerminals.map(t => (
-                                    <th key={t} className="p-2 border-r border-gray-700 min-w-[60px] text-center font-mono">{t}</th>
+                                    <th key={t} className="p-2 border border-gray-700 text-center min-w-[40px] font-mono text-gray-400">{t}</th>
                                 ))}
                             </tr>
                         </thead>
                         <tbody>
-                            {sortedNonTerminals.map(nt => (
-                                <tr key={nt} className="border-b border-gray-700/50 hover:bg-gray-800/30">
-                                    <td className="p-2 border-r border-gray-600 font-mono text-yellow-500 sticky left-0 bg-gray-900">{nt}</td>
+                            {tableNonTerminals.map(nt => (
+                                <tr key={nt} className="border-b border-gray-800 hover:bg-gray-800/30">
+                                    <td className="p-2 border border-gray-800 font-bold text-gray-300 bg-gray-900/50 sticky left-0">{nt}</td>
                                     {tableTerminals.map(t => {
-                                        const prods = analysis.table[nt][t];
+                                        const entry = analysis.table[nt]?.[t];
                                         return (
-                                            <td key={t} className="p-2 border-r border-gray-700/50 text-center font-mono text-gray-400 whitespace-nowrap">
-                                                {prods && prods.length > 0 ? (
-                                                    prods.map((p, i) => (
-                                                        <div key={i} className={prods.length > 1 ? "text-red-400" : "text-blue-300"}>
-                                                            {nt} &rarr; {p}
-                                                        </div>
-                                                    ))
-                                                ) : <span className="text-gray-700">-</span>}
+                                            <td key={t} className="p-2 border border-gray-800 text-center font-mono text-[10px] text-gray-400 whitespace-nowrap">
+                                                {entry ? (
+                                                    <span className="text-green-400 bg-green-900/20 px-1 rounded">
+                                                        {nt} &rarr; {entry.join(' ')}
+                                                    </span>
+                                                ) : ''}
                                             </td>
                                         );
                                     })}
@@ -488,14 +500,6 @@ const GrammarView = ({ analysis }: { analysis: GrammarAnalysis }) => {
                         </tbody>
                     </table>
                 </div>
-            </div>
-            
-            {/* Grammar Source */}
-             <div>
-                <h3 className="text-gray-500 font-bold mb-2 text-xs uppercase">Reference Grammar</h3>
-                <pre className="text-xs text-gray-600 bg-gray-950 p-4 rounded overflow-auto max-h-40">
-                    {analysis.grammarStr}
-                </pre>
             </div>
         </div>
     );
@@ -526,6 +530,7 @@ function App() {
 
   const compile = async () => {
     setOutput("");
+    
     try {
       // 1. Lexer
       const lexer = new Lexer(code);
@@ -539,7 +544,7 @@ function App() {
       const stGen = new SymbolTableGenerator();
       const symTable = stGen.generate(ast);
 
-      // 4. TAC
+      // 4. Semantic Analysis (Translation Scheme)
       const tacGen = new TACGenerator(symTable);
       tacGen.generate(ast);
       
@@ -547,9 +552,7 @@ function App() {
       const optimizer = new Optimizer();
       const optimizedTAC = optimizer.optimize(tacGen.code);
 
-      // 6. P-Code (Target) - Still using original TAC for safety/consistency with VM currently
-      // Note: If you want to run optimized code, swap tacGen.code with optimizedTAC below.
-      // For visualization purposes, we show both.
+      // 6. P-Code (Target)
       const targetGen = new TargetCodeGenerator(symTable);
       targetGen.generate(tacGen.code); 
       const instructions = targetGen.instructions;
@@ -561,7 +564,8 @@ function App() {
         tac: tacGen.code, 
         optimizedTac: optimizedTAC, 
         optimizerLogs: optimizer.logs,
-        instructions
+        instructions,
+        labelMap: targetGen.labelMap
       });
       
       log("编译成功！\n");
@@ -575,16 +579,16 @@ function App() {
   };
 
   const run = async () => {
-    const code = await compile();
-    if (!code) return;
+    const instructions = await compile();
+    if (!instructions) return;
     
     setIsRunning(true);
     setActiveTab("console");
     
-    const vm = new VirtualMachine(code);
+    const vm = new VirtualMachine(instructions);
     vm.onOutput = (msg) => log(msg);
     vm.onRequestInput = () => {
-        return new Promise((resolve) => {
+        return new Promise<number>((resolve) => {
             setInputNeeded(true);
             (resolveInput as any).current = resolve;
             setTimeout(() => terminalInputRef.current?.focus(), 100);
@@ -620,12 +624,12 @@ function App() {
       <header className="h-12 bg-gray-800 border-b border-gray-700 flex items-center px-4 justify-between">
         <h1 className="font-bold text-lg text-blue-400">PL/0 编译器</h1>
         <div className="flex gap-2">
-          <button onClick={compile} className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm transition">
-            编译
-          </button>
-          <button onClick={run} disabled={isRunning} className={`px-3 py-1 rounded text-sm transition ${isRunning ? 'bg-gray-600 cursor-not-allowed' : 'bg-green-700 hover:bg-green-600 text-white'}`}>
-            运行
-          </button>
+            <button onClick={compile} className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm transition">
+                编译
+            </button>
+            <button onClick={run} disabled={isRunning} className={`px-3 py-1 rounded text-sm transition ${isRunning ? 'bg-gray-600 cursor-not-allowed' : 'bg-green-700 hover:bg-green-600 text-white'}`}>
+                运行
+            </button>
         </div>
       </header>
 
@@ -646,7 +650,7 @@ function App() {
         <div className="w-1/2 flex flex-col">
           {/* Tabs */}
           <div className="flex bg-gray-800 border-b border-gray-700 overflow-x-auto">
-            {['console', 'tokens', 'grammar', 'ast', 'symbol_table', 'stack_frame', 'tac', 'optimization', 'pcode'].map(tab => (
+            {['console', 'tokens', 'grammar', 'ast', 'symbol_table', 'label_table', 'stack_frame', 'tac', 'optimization', 'pcode'].map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -662,14 +666,15 @@ function App() {
               <div className="h-full flex flex-col">
                 <pre className="flex-1 whitespace-pre-wrap">{output}</pre>
                 {inputNeeded && (
-                    <div className="flex items-center border-t border-gray-700 pt-2">
+                    <div className="flex items-center border-t border-gray-700 pt-2 animate-pulse">
                         <span className="text-green-500 mr-2">$</span>
                         <input 
                             ref={terminalInputRef}
                             type="number" 
-                            className="bg-transparent outline-none flex-1"
+                            className="bg-transparent outline-none flex-1 text-white"
                             onKeyDown={handleInput}
                             placeholder="等待输入..."
+                            autoFocus
                         />
                     </div>
                 )}
@@ -701,33 +706,82 @@ function App() {
                  artifacts.symTable ? <SymbolTableNode table={artifacts.symTable} /> : <div className="text-gray-500 italic">未生成符号表</div>
             )}
 
+            {activeTab === 'label_table' && (
+                <div className="flex flex-col gap-4">
+                  <div className="bg-gray-800 p-3 rounded border border-gray-700 mb-2">
+                    <p className="text-gray-400 text-xs">标号表记录了程序中所有标号（Procedure入口、跳转目标）对应的 P-Code 指令地址。虚拟机会根据这些地址进行跳转。</p>
+                  </div>
+                  <table className="w-full text-left text-xs">
+                      <thead>
+                          <tr className="border-b border-gray-700 text-gray-500">
+                              <th className="py-2">标号 (Label)</th>
+                              <th className="py-2">目标指令地址 (Target Address)</th>
+                              <th className="py-2">说明 (Description)</th>
+                          </tr>
+                      </thead>
+                      <tbody>
+                          {artifacts.labelMap && Object.keys(artifacts.labelMap).length > 0 ? (
+                              Object.entries(artifacts.labelMap).map(([label, addr]: [string, any], i: number) => (
+                                  <tr key={i} className="border-b border-gray-800 hover:bg-gray-800">
+                                      <td className="py-2 font-mono text-yellow-400">{label}</td>
+                                      <td className="py-2 font-mono text-blue-300">{addr}</td>
+                                      <td className="py-2 text-gray-500 italic">
+                                        {label.startsWith('proc_') ? `过程 ${label.replace('proc_', '')} 入口` : '跳转目标'}
+                                      </td>
+                                  </tr>
+                              ))
+                          ) : (
+                              <tr><td colSpan={3} className="py-4 text-center text-gray-600">无标号数据</td></tr>
+                          )}
+                      </tbody>
+                  </table>
+                </div>
+            )}
+
             {activeTab === 'stack_frame' && (
                  <StackFrameView rootTable={artifacts.symTable} />
             )}
 
             {activeTab === 'tac' && (
-                <table className="w-full text-left text-xs">
-                    <thead>
-                        <tr className="border-b border-gray-700 text-gray-500">
-                            <th className="py-1">序号 (ID)</th>
-                            <th>操作 (OP)</th>
-                            <th>参数1 (ARG1)</th>
-                            <th>参数2 (ARG2)</th>
-                            <th>结果 (RES)</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {artifacts.tac?.map((q: any) => (
-                            <tr key={q.id} className="border-b border-gray-800 hover:bg-gray-800">
-                                <td className="py-1 text-gray-500">{q.id}</td>
-                                <td className="text-purple-400 font-bold">{q.op}</td>
-                                <td>{q.arg1}</td>
-                                <td>{q.arg2}</td>
-                                <td className="text-yellow-300">{q.result}</td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+                <div className="flex gap-4 h-full">
+                    <div className="w-1/3 flex flex-col gap-2">
+                         <div className="bg-gray-800 p-2 rounded border border-gray-700 font-bold text-blue-400 text-xs">
+                            翻译模式定义 (Translation Scheme Definition)
+                         </div>
+                         <div className="flex-1 bg-gray-900 border border-gray-700 rounded overflow-auto p-4">
+                            <pre className="text-xs font-mono text-gray-400 whitespace-pre-wrap">{TRANSLATION_SCHEME_DEF}</pre>
+                         </div>
+                    </div>
+                    <div className="w-2/3 flex flex-col gap-2">
+                         <div className="bg-gray-800 p-2 rounded border border-gray-700 font-bold text-yellow-400 text-xs">
+                            生成的中间代码 (Generated Quadruples)
+                         </div>
+                         <div className="flex-1 overflow-auto bg-[#1e1e1e] p-4 border border-gray-700 rounded">
+                            <table className="w-full text-left text-xs">
+                                <thead className="sticky top-0 bg-[#1e1e1e]">
+                                    <tr className="border-b border-gray-700 text-gray-500">
+                                        <th className="py-1">序号 (ID)</th>
+                                        <th>操作 (OP)</th>
+                                        <th>参数1 (ARG1)</th>
+                                        <th>参数2 (ARG2)</th>
+                                        <th>结果 (RES)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {artifacts.tac?.map((q: any) => (
+                                        <tr key={q.id} className="border-b border-gray-800 hover:bg-gray-800">
+                                            <td className="py-1 text-gray-500">{q.id}</td>
+                                            <td className="text-purple-400 font-bold">{q.op}</td>
+                                            <td>{q.arg1}</td>
+                                            <td>{q.arg2}</td>
+                                            <td className="text-yellow-300">{q.result}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             )}
 
             {activeTab === 'optimization' && (
@@ -862,28 +916,9 @@ function App() {
                     </div>
                 </div>
             )}
-
+            
             {activeTab === 'pcode' && (
-                <table className="w-full text-left text-xs">
-                    <thead>
-                        <tr className="border-b border-gray-700 text-gray-500">
-                            <th className="py-1">地址 (ADDR)</th>
-                            <th>功能 (F)</th>
-                            <th>层差 (L)</th>
-                            <th>参数 (A)</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {artifacts.instructions?.map((inst: any, i: number) => (
-                            <tr key={i} className="border-b border-gray-800 hover:bg-gray-800">
-                                <td className="py-1 text-gray-500">{i}</td>
-                                <td className="text-red-400 font-bold">{inst.f}</td>
-                                <td>{inst.l}</td>
-                                <td className="text-blue-300">{inst.a}</td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+                <PCodeView instructions={artifacts.instructions} />
             )}
 
             {activeTab === 'grammar' && grammarAnalysis && (

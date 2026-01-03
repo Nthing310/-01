@@ -1,4 +1,5 @@
-import { Token, TokenType, ProgramNode, BlockNode, ConstDeclNode, VarDeclNode, ProcNode, BodyNode, StatementNode, AssignNode, CallNode, IfNode, WhileNode, ReadNode, WriteNode, ExpNode, OddNode, BinOpNode, NumNode, VarNode, ParenNode } from '../types';
+
+import { Token, TokenType, ProgramNode, BlockNode, ConstDeclNode, VarDeclNode, ProcNode, StatementNode, AssignNode, CallNode, BeginEndNode, IfNode, WhileNode, ReadNode, WriteNode, ExpNode, OddNode, BinOpNode, NumNode, VarNode } from '../types';
 
 export class Parser {
   private tokens: Token[];
@@ -18,161 +19,102 @@ export class Parser {
       this.pos++;
       return t;
     }
-    throw new Error(`Syntax Error at line ${t?.line || 'end'}: Expected ${TokenType[type]} but found ${t ? TokenType[t.sym] : 'EOF'}`);
+    throw new Error(`Syntax Error at line ${t?.line}: Expected ${TokenType[type]} but found ${t ? TokenType[t.sym] : 'EOF'}`);
   }
 
   public parse(): ProgramNode {
-    this.match(TokenType.PROGRAM);
-    const id = this.match(TokenType.IDENT);
-    this.match(TokenType.SEMICOLON);
     const block = this.parseBlock();
     this.match(TokenType.PERIOD);
-    return new ProgramNode(id.lexeme, block);
+    return new ProgramNode(block);
   }
 
   private parseBlock(): BlockNode {
     let constDecl: ConstDeclNode | null = null;
     if (this.peek()?.sym === TokenType.CONST) {
-      constDecl = this.parseConstDecl();
-    }
-
-    let varDecl: VarDeclNode | null = null;
-    if (this.peek()?.sym === TokenType.VAR) {
-      varDecl = this.parseVarDecl();
-    }
-
-    const procs: ProcNode[] = [];
-    while (this.peek()?.sym === TokenType.PROCEDURE) {
-      procs.push(this.parseProc());
-    }
-
-    const body = this.parseBody();
-    return new BlockNode(constDecl, varDecl, procs, body);
-  }
-
-  private parseConstDecl(): ConstDeclNode {
-    this.match(TokenType.CONST);
-    const consts: { name: string, value: number }[] = [];
-    do {
-      const id = this.match(TokenType.IDENT);
-      this.match(TokenType.BECOMES); // The PDF says := for const decl, standard Pascal is = but we follow PDF
-      const num = this.match(TokenType.NUMBER);
-      consts.push({ name: id.lexeme, value: num.value });
-      if (this.peek()?.sym === TokenType.COMMA) {
-        this.match(TokenType.COMMA);
-      } else {
-        break;
-      }
-    } while (true);
-    this.match(TokenType.SEMICOLON); // PDF spec says semi after const block
-    return new ConstDeclNode(consts);
-  }
-
-  private parseVarDecl(): VarDeclNode {
-    this.match(TokenType.VAR);
-    const vars: string[] = [];
-    do {
-      const id = this.match(TokenType.IDENT);
-      vars.push(id.lexeme);
-      if (this.peek()?.sym === TokenType.COMMA) {
-        this.match(TokenType.COMMA);
-      } else {
-        break;
-      }
-    } while (true);
-    
-    if (this.peek()?.sym === TokenType.SEMICOLON) {
-      this.match(TokenType.SEMICOLON);
-    }
-    return new VarDeclNode(vars);
-  }
-
-  private parseProc(): ProcNode {
-    this.match(TokenType.PROCEDURE);
-    const id = this.match(TokenType.IDENT);
-    this.match(TokenType.LPAREN);
-    const params: string[] = [];
-    if (this.peek()?.sym === TokenType.IDENT) {
+      this.match(TokenType.CONST);
+      const consts = [];
       do {
-        params.push(this.match(TokenType.IDENT).lexeme);
+        const id = this.match(TokenType.IDENT).lexeme;
+        this.match(TokenType.EQL);
+        const val = this.match(TokenType.NUMBER).value;
+        consts.push({ name: id, value: val });
         if (this.peek()?.sym === TokenType.COMMA) {
           this.match(TokenType.COMMA);
         } else {
           break;
         }
       } while (true);
-    }
-    this.match(TokenType.RPAREN);
-    this.match(TokenType.SEMICOLON);
-    const block = this.parseBlock();
-    this.match(TokenType.SEMICOLON);
-    return new ProcNode(id.lexeme, params, block);
-  }
-
-  private parseBody(): BodyNode {
-    this.match(TokenType.BEGIN);
-    const stmts: StatementNode[] = [];
-    stmts.push(this.parseStatement());
-    while (this.peek()?.sym === TokenType.SEMICOLON) {
       this.match(TokenType.SEMICOLON);
-      // PDF Error handling: "not allowed last statement semi" logic is optional but good.
-      if (this.peek()?.sym !== TokenType.END) {
-        stmts.push(this.parseStatement());
-      }
+      constDecl = new ConstDeclNode(consts);
     }
-    this.match(TokenType.END);
-    return new BodyNode(stmts);
+
+    let varDecl: VarDeclNode | null = null;
+    if (this.peek()?.sym === TokenType.VAR) {
+      this.match(TokenType.VAR);
+      const vars = [];
+      do {
+        vars.push(this.match(TokenType.IDENT).lexeme);
+        if (this.peek()?.sym === TokenType.COMMA) {
+          this.match(TokenType.COMMA);
+        } else {
+          break;
+        }
+      } while (true);
+      this.match(TokenType.SEMICOLON);
+      varDecl = new VarDeclNode(vars);
+    }
+
+    const procs: ProcNode[] = [];
+    while (this.peek()?.sym === TokenType.PROCEDURE) {
+      this.match(TokenType.PROCEDURE);
+      const name = this.match(TokenType.IDENT).lexeme;
+      this.match(TokenType.SEMICOLON);
+      const block = this.parseBlock();
+      this.match(TokenType.SEMICOLON);
+      procs.push(new ProcNode(name, block));
+    }
+
+    const stmt = this.parseStatement();
+    return new BlockNode(constDecl, varDecl, procs, stmt);
   }
 
   private parseStatement(): StatementNode {
-    const sym = this.peek()?.sym;
-    if (sym === TokenType.IDENT) {
-      const id = this.match(TokenType.IDENT);
+    const t = this.peek();
+    if (t?.sym === TokenType.IDENT) {
+      const name = this.match(TokenType.IDENT).lexeme;
       this.match(TokenType.BECOMES);
       const expr = this.parseExpression();
-      return new AssignNode(id.lexeme, expr);
-    } else if (sym === TokenType.IF) {
+      return new AssignNode(name, expr);
+    } else if (t?.sym === TokenType.CALL) {
+      this.match(TokenType.CALL);
+      const name = this.match(TokenType.IDENT).lexeme;
+      return new CallNode(name);
+    } else if (t?.sym === TokenType.BEGIN) {
+      this.match(TokenType.BEGIN);
+      const stmts = [];
+      stmts.push(this.parseStatement());
+      while (this.peek()?.sym === TokenType.SEMICOLON) {
+        this.match(TokenType.SEMICOLON);
+        stmts.push(this.parseStatement());
+      }
+      this.match(TokenType.END);
+      return new BeginEndNode(stmts);
+    } else if (t?.sym === TokenType.IF) {
       this.match(TokenType.IF);
-      const lexp = this.parseLExp();
+      const cond = this.parseCondition();
       this.match(TokenType.THEN);
       const thenStmt = this.parseStatement();
-      let elseStmt: StatementNode | null = null;
-      if (this.peek()?.sym === TokenType.ELSE) {
-        this.match(TokenType.ELSE);
-        elseStmt = this.parseStatement();
-      }
-      return new IfNode(lexp, thenStmt, elseStmt);
-    } else if (sym === TokenType.WHILE) {
+      return new IfNode(cond, thenStmt);
+    } else if (t?.sym === TokenType.WHILE) {
       this.match(TokenType.WHILE);
-      const lexp = this.parseLExp();
+      const cond = this.parseCondition();
       this.match(TokenType.DO);
-      const stmt = this.parseStatement();
-      return new WhileNode(lexp, stmt);
-    } else if (sym === TokenType.CALL) {
-      this.match(TokenType.CALL);
-      const id = this.match(TokenType.IDENT);
-      const args: ExpNode[] = [];
-      if (this.peek()?.sym === TokenType.LPAREN) {
-        this.match(TokenType.LPAREN);
-        if (this.peek()?.sym !== TokenType.RPAREN) {
-          do {
-            args.push(this.parseExpression());
-            if (this.peek()?.sym === TokenType.COMMA) {
-              this.match(TokenType.COMMA);
-            } else {
-              break;
-            }
-          } while (true);
-        }
-        this.match(TokenType.RPAREN);
-      }
-      return new CallNode(id.lexeme, args);
-    } else if (sym === TokenType.BEGIN) {
-      return this.parseBody();
-    } else if (sym === TokenType.READ) {
+      const doStmt = this.parseStatement();
+      return new WhileNode(cond, doStmt);
+    } else if (t?.sym === TokenType.READ) {
       this.match(TokenType.READ);
       this.match(TokenType.LPAREN);
-      const vars: string[] = [];
+      const vars = [];
       do {
         vars.push(this.match(TokenType.IDENT).lexeme);
         if (this.peek()?.sym === TokenType.COMMA) {
@@ -183,10 +125,10 @@ export class Parser {
       } while (true);
       this.match(TokenType.RPAREN);
       return new ReadNode(vars);
-    } else if (sym === TokenType.WRITE) {
+    } else if (t?.sym === TokenType.WRITE) {
       this.match(TokenType.WRITE);
       this.match(TokenType.LPAREN);
-      const exprs: ExpNode[] = [];
+      const exprs = [];
       do {
         exprs.push(this.parseExpression());
         if (this.peek()?.sym === TokenType.COMMA) {
@@ -198,28 +140,28 @@ export class Parser {
       this.match(TokenType.RPAREN);
       return new WriteNode(exprs);
     } else {
-      // Empty statement or error. PL/0 usually assumes a statement.
-      // To prevent infinite loops on error, let's consume or error.
-      // But Body parser handles empty between semi-colons? No.
-      throw new Error(`Syntax Error at line ${this.peek()?.line}: Unexpected token ${TokenType[sym!]}`);
+      // Empty statement
+      return new BeginEndNode([]);
     }
   }
 
-  private parseLExp(): ExpNode {
+  private parseCondition(): ExpNode {
     if (this.peek()?.sym === TokenType.ODD) {
       this.match(TokenType.ODD);
       const expr = this.parseExpression();
       return new OddNode(expr);
+    } else {
+      const left = this.parseExpression();
+      const opToken = this.peek();
+      if (opToken && [TokenType.EQL, TokenType.NEQ, TokenType.LSS, TokenType.LEQ, TokenType.GTR, TokenType.GEQ].includes(opToken.sym)) {
+        this.match(opToken.sym);
+        const right = this.parseExpression();
+        let op = opToken.lexeme;
+        if(opToken.sym === TokenType.NEQ) op = '<>'; // Normalize # to <> if used
+        return new BinOpNode(op, left, right);
+      }
+      throw new Error("Expected relational operator");
     }
-    const left = this.parseExpression();
-    const sym = this.peek()?.sym;
-    if (sym === TokenType.EQL || sym === TokenType.NEQ || sym === TokenType.LSS || 
-        sym === TokenType.LEQ || sym === TokenType.GTR || sym === TokenType.GEQ) {
-      const op = this.match(sym!).lexeme;
-      const right = this.parseExpression();
-      return new BinOpNode(op, left, right);
-    }
-    throw new Error(`Syntax Error: Expected relational operator in lexp`);
   }
 
   private parseExpression(): ExpNode {
@@ -227,41 +169,41 @@ export class Parser {
     if (this.peek()?.sym === TokenType.PLUS || this.peek()?.sym === TokenType.MINUS) {
       sign = this.match(this.peek()!.sym).lexeme;
     }
-    let node = this.parseTerm();
+    let term = this.parseTerm();
     if (sign === '-') {
-      node = new BinOpNode('-', new NumNode(0), node);
+      term = new BinOpNode('-', new NumNode(0), term);
     }
 
     while (this.peek()?.sym === TokenType.PLUS || this.peek()?.sym === TokenType.MINUS) {
       const op = this.match(this.peek()!.sym).lexeme;
       const right = this.parseTerm();
-      node = new BinOpNode(op, node, right);
+      term = new BinOpNode(op, term, right);
     }
-    return node;
+    return term;
   }
 
   private parseTerm(): ExpNode {
-    let node = this.parseFactor();
+    let factor = this.parseFactor();
     while (this.peek()?.sym === TokenType.TIMES || this.peek()?.sym === TokenType.SLASH) {
       const op = this.match(this.peek()!.sym).lexeme;
       const right = this.parseFactor();
-      node = new BinOpNode(op, node, right);
+      factor = new BinOpNode(op, factor, right);
     }
-    return node;
+    return factor;
   }
 
   private parseFactor(): ExpNode {
-    const sym = this.peek()?.sym;
-    if (sym === TokenType.IDENT) {
+    const t = this.peek();
+    if (t?.sym === TokenType.IDENT) {
       return new VarNode(this.match(TokenType.IDENT).lexeme);
-    } else if (sym === TokenType.NUMBER) {
+    } else if (t?.sym === TokenType.NUMBER) {
       return new NumNode(this.match(TokenType.NUMBER).value);
-    } else if (sym === TokenType.LPAREN) {
+    } else if (t?.sym === TokenType.LPAREN) {
       this.match(TokenType.LPAREN);
       const expr = this.parseExpression();
       this.match(TokenType.RPAREN);
-      return new ParenNode(expr);
+      return expr;
     }
-    throw new Error(`Syntax Error: Unexpected factor ${TokenType[sym!]}`);
+    throw new Error("Expected factor");
   }
 }

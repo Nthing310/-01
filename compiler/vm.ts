@@ -2,7 +2,7 @@
 import { Instruction, PCodeF } from '../types';
 
 export class VirtualMachine {
-  private stack: number[] = new Array(1000).fill(0);
+  private stack: number[] = new Array(2000).fill(0);
   private p: number = 0; // Program Counter
   private b: number = 0; // Base Pointer
   private t: number = 0; // Top Stack Pointer
@@ -28,12 +28,8 @@ export class VirtualMachine {
     this.t = 0;
     this.b = 0;
     this.p = 0;
-    this.stack[0] = 0;
-    this.stack[1] = 0;
-    this.stack[2] = 0;
-
-    // We start assuming T points to next free slot. 
-    // Frame header is 3.
+    this.stack.fill(0);
+    // Base frame init
     this.t = 3; 
 
     while (this.p < this.instructions.length) {

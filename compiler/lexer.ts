@@ -1,19 +1,18 @@
+
 import { Token, TokenType } from '../types';
 
 const KEYWORDS: Record<string, TokenType> = {
-  'program': TokenType.PROGRAM,
   'const': TokenType.CONST,
   'var': TokenType.VAR,
   'procedure': TokenType.PROCEDURE,
   'begin': TokenType.BEGIN,
   'end': TokenType.END,
-  'odd': TokenType.ODD,
   'if': TokenType.IF,
   'then': TokenType.THEN,
-  'else': TokenType.ELSE,
   'while': TokenType.WHILE,
   'do': TokenType.DO,
   'call': TokenType.CALL,
+  'odd': TokenType.ODD,
   'read': TokenType.READ,
   'write': TokenType.WRITE
 };
@@ -23,18 +22,15 @@ const SYMBOLS: Record<string, TokenType> = {
   '-': TokenType.MINUS,
   '*': TokenType.TIMES,
   '/': TokenType.SLASH,
+  '=': TokenType.EQL,
+  '#': TokenType.NEQ,
+  '<': TokenType.LSS,
+  '>': TokenType.GTR,
   '(': TokenType.LPAREN,
   ')': TokenType.RPAREN,
   ',': TokenType.COMMA,
   ';': TokenType.SEMICOLON,
-  '.': TokenType.PERIOD,
-  '=': TokenType.EQL,
-  '<>': TokenType.NEQ,
-  '<': TokenType.LSS,
-  '<=': TokenType.LEQ,
-  '>': TokenType.GTR,
-  '>=': TokenType.GEQ,
-  ':=': TokenType.BECOMES
+  '.': TokenType.PERIOD
 };
 
 export class Lexer {
@@ -58,6 +54,7 @@ export class Lexer {
 
   public tokenize(): Token[] {
     const tokens: Token[] = [];
+
     while (this.pos < this.src.length) {
       const ch = this.peek();
 
@@ -70,7 +67,7 @@ export class Lexer {
         }
         const lower = ident.toLowerCase();
         if (lower in KEYWORDS) {
-          tokens.push({ sym: KEYWORDS[lower], lexeme: lower, value: 0, line: this.line });
+          tokens.push({ sym: KEYWORDS[lower], lexeme: ident, value: 0, line: this.line });
         } else {
           tokens.push({ sym: TokenType.IDENT, lexeme: ident, value: 0, line: this.line });
         }
@@ -108,7 +105,6 @@ export class Lexer {
           tokens.push({ sym: TokenType.GTR, lexeme: '>', value: 0, line: this.line });
         }
       } else {
-        // Single char symbols
         if (ch in SYMBOLS) {
           this.advance();
           tokens.push({ sym: SYMBOLS[ch], lexeme: ch, value: 0, line: this.line });

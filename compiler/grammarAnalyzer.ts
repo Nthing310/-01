@@ -10,46 +10,40 @@ export interface GrammarAnalysis {
   nonTerminals: Set<string>;
   first: Record<string, Set<string>>;
   follow: Record<string, Set<string>>;
-  table: Record<string, Record<string, string[]>>; // NonTerminal -> Terminal -> Production RHS[]
+  table: Record<string, Record<string, string[]>>; // M[NonTerminal, Terminal] = RHS[]
 }
 
-// Define PL/0 Grammar (Adapted for LL(1))
-// Non-terminals start with Uppercase. Terminals are lowercase or symbols.
-// 'ε' represents epsilon.
 const PL0_GRAMMAR = `
-Program -> program id ; Block .
-Block -> ConstDecl VarDecl ProcDecl Body
-ConstDecl -> const id := num ConstTail ; | ε
-ConstTail -> , id := num ConstTail | ε
-VarDecl -> var id VarTail ; | ε
+Program -> Block .
+Block -> ConstDecl VarDecl ProcDecl Statement
+ConstDecl -> const ConstList ; | ε
+ConstList -> id = num ConstTail
+ConstTail -> , id = num ConstTail | ε
+VarDecl -> var VarList ; | ε
+VarList -> id VarTail
 VarTail -> , id VarTail | ε
-ProcDecl -> procedure id ( Params ) ; Block ; ProcDecl | ε
-Params -> id ParamTail | ε
-ParamTail -> , id ParamTail | ε
-Body -> begin Statement StmtTail end
-StmtTail -> ; Statement StmtTail | ε
+ProcDecl -> procedure id ; Block ; ProcDecl | ε
 Statement -> id := Expression
-Statement -> if Lexp then Statement ElsePart
-Statement -> while Lexp do Statement
-Statement -> call id CallArgs
-Statement -> read ( id ReadTail )
-Statement -> write ( Expression WriteTail )
-Statement -> Body
-ElsePart -> else Statement | ε
-CallArgs -> ( Expression ExprsTail ) | ε
-ExprsTail -> , Expression ExprsTail | ε
-ReadTail -> , id ReadTail | ε
-WriteTail -> , Expression WriteTail | ε
-Lexp -> odd Expression | Expression RelOp Expression
-RelOp -> = | <> | < | <= | > | >=
-Expression -> Sign Term ExprRest
-Sign -> + | - | ε
-ExprRest -> AddOp Term ExprRest | ε
-AddOp -> + | -
-Term -> Factor TermRest
-TermRest -> MulOp Factor TermRest | ε
-MulOp -> * | /
+Statement -> call id
+Statement -> begin StmtList end
+Statement -> if Condition then Statement
+Statement -> while Condition do Statement
+Statement -> read ( IdList )
+Statement -> write ( ExprList )
+Statement -> ε
+StmtList -> Statement StmtTail
+StmtTail -> ; Statement StmtTail | ε
+Condition -> odd Expression | Expression RelOp Expression
+RelOp -> = | # | < | <= | > | >=
+Expression -> Term AddOpTerm
+AddOpTerm -> + Term AddOpTerm | - Term AddOpTerm | ε
+Term -> Factor MulOpFactor
+MulOpFactor -> * Factor MulOpFactor | / Factor MulOpFactor | ε
 Factor -> id | num | ( Expression )
+IdList -> id IdListTail
+IdListTail -> , id IdListTail | ε
+ExprList -> Expression ExprListTail
+ExprListTail -> , Expression ExprListTail | ε
 `;
 
 export class GrammarAnalyzer {
@@ -64,7 +58,7 @@ export class GrammarAnalyzer {
     this.parseGrammar(PL0_GRAMMAR);
     this.computeFirst();
     this.computeFollow();
-    this.buildTable();
+    this.computeTable();
   }
 
   public getAnalysis(): GrammarAnalysis {
@@ -91,15 +85,16 @@ export class GrammarAnalyzer {
         this.productions.push({ lhs, rhs });
         
         rhs.forEach(sym => {
-          // Identify terminals: not starting with Uppercase, and not ε
-          if (sym !== 'ε' && !/^[A-Z]/.test(sym.charAt(0))) {
+          if (sym !== 'ε' && !/^[A-Z]/.test(sym.charAt(0)) && sym !== '.') {
                 this.terminals.add(sym);
           }
         });
       });
     });
     
-    // Safety check: ensure all symbols in RHS that are not LHS are terminals
+    // Ensure '.' (end of program) is in terminals
+    this.terminals.add('.');
+    
     this.productions.forEach(p => {
         p.rhs.forEach(sym => {
             if (sym !== 'ε' && !this.nonTerminals.has(sym)) {
@@ -150,10 +145,8 @@ export class GrammarAnalyzer {
 
   private computeFollow() {
     this.nonTerminals.forEach(nt => this.follow[nt] = new Set());
-    // Assume first non-terminal defined is start symbol? 
-    // In PL/0 map, 'Program' is the start.
     if(this.nonTerminals.has('Program')) {
-        this.follow['Program'].add('$');
+        this.follow['Program'].add('$'); // $ represents EOF
     }
 
     let changed = true;
@@ -199,18 +192,19 @@ export class GrammarAnalyzer {
     }
   }
 
-  private buildTable() {
+  private computeTable() {
+    // Initialize table
     this.nonTerminals.forEach(nt => {
       this.table[nt] = {};
-      this.terminals.forEach(t => this.table[nt][t] = []);
-      this.table[nt]['$'] = [];
     });
 
     for (const p of this.productions) {
       const { lhs, rhs } = p;
       
+      // Calculate First(rhs)
       const firstRhs = new Set<string>();
       let allDeriveEpsilon = true;
+      
       for (const sym of rhs) {
         if (sym === 'ε') continue;
         if (this.terminals.has(sym)) {
@@ -218,35 +212,28 @@ export class GrammarAnalyzer {
           allDeriveEpsilon = false;
           break;
         } else if (this.nonTerminals.has(sym)) {
-          const f = this.first[sym];
-          f.forEach(x => { if(x !== 'ε') firstRhs.add(x); });
-          if (!f.has('ε')) {
-            allDeriveEpsilon = false;
-            break;
-          }
+           this.first[sym].forEach(f => {
+             if (f !== 'ε') firstRhs.add(f);
+           });
+           if (!this.first[sym].has('ε')) {
+             allDeriveEpsilon = false;
+             break;
+           }
         }
       }
-      if (allDeriveEpsilon || (rhs.length === 1 && rhs[0] === 'ε')) {
-        firstRhs.add('ε');
-      }
+      if (allDeriveEpsilon) firstRhs.add('ε');
 
+      // Rule 1: For each terminal a in First(rhs), add A->rhs to M[A,a]
       firstRhs.forEach(a => {
         if (a !== 'ε') {
-            if (!this.table[lhs][a]) this.table[lhs][a] = [];
-            const prodString = rhs.join(' ');
-            if (!this.table[lhs][a].includes(prodString)) {
-                this.table[lhs][a].push(prodString);
-            }
+          this.table[lhs][a] = rhs;
         }
       });
 
-      if (firstRhs.has('ε')) {
+      // Rule 2: If ε in First(rhs), for each terminal b in Follow(A), add A->rhs to M[A,b]
+      if (firstRhs.has('ε') || (rhs.length === 1 && rhs[0] === 'ε')) {
         this.follow[lhs].forEach(b => {
-             if (!this.table[lhs][b]) this.table[lhs][b] = [];
-             const prodString = rhs.join(' ');
-             if (!this.table[lhs][b].includes(prodString)) {
-                this.table[lhs][b].push(prodString);
-             }
+          this.table[lhs][b] = rhs;
         });
       }
     }

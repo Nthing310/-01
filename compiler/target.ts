@@ -4,7 +4,7 @@ import { Quadruple, SymbolTable, PCodeF, Instruction, SymbolEntry } from '../typ
 export class TargetCodeGenerator {
   public instructions: Instruction[] = [];
   private rootTable: SymbolTable;
-  private labelMap: Record<string, number> = {};
+  public labelMap: Record<string, number> = {}; 
   private procMap: Record<string, SymbolEntry> = {};
 
   constructor(symbolTable: SymbolTable) {
@@ -71,7 +71,9 @@ export class TargetCodeGenerator {
              const pEntry = this.procMap[currentProc];
              if(pEntry) size = pEntry.size;
           }
-          this.emit(PCodeF.INT, 0, size);
+          // Allocate extra space for temporaries (T1, T2...) to avoid overwriting next frame.
+          // Increased safety buffer to 100 to prevent collisions in deep recursions or large expressions.
+          this.emit(PCodeF.INT, 0, size + 100); 
         }
         continue;
       }
@@ -111,7 +113,8 @@ export class TargetCodeGenerator {
           this.genOperand(quad.arg1, currentProc);
           break;
         case 'READ':
-          this.emit(PCodeF.OPR, 0, 16);
+          this.emit(PCodeF.OPR, 0, 16); // Pushes input to stack
+          this.genStore(quad.result, currentProc); // Store stack top to result
           break;
         case 'WRITE':
           this.genOperand(quad.arg1, currentProc);
@@ -119,66 +122,75 @@ export class TargetCodeGenerator {
           break;
         case ':=':
           this.genOperand(quad.arg1, currentProc);
-          const dest = this.findSymbol(quad.result, currentProc);
-          if (dest) {
-            this.emit(PCodeF.STO, dest.levelDiff, Number(dest.entry.addr));
-          }
+          this.genStore(quad.result, currentProc);
           break;
         
         // --- Arithmetic & Logic ---
+        // For all these, we must STORE the result of OPR back to the TAC result variable.
         case '+': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 2); 
+          this.genStore(quad.result, currentProc);
           break;
         case '-': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 3); 
+          this.genStore(quad.result, currentProc);
           break;
         case '*': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 4); 
+          this.genStore(quad.result, currentProc);
           break;
         case '/': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 5); 
+          this.genStore(quad.result, currentProc);
           break;
         case 'ODD': 
           this.genOperand(quad.arg1, currentProc);
           this.emit(PCodeF.OPR, 0, 6); 
+          this.genStore(quad.result, currentProc);
           break;
         case '=': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 8); 
+          this.genStore(quad.result, currentProc);
           break;
         case '<>': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 9); 
+          this.genStore(quad.result, currentProc);
           break;
         case '<': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 10); 
+          this.genStore(quad.result, currentProc);
           break;
         case '>=': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 11); 
+          this.genStore(quad.result, currentProc);
           break;
         case '>': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 12); 
+          this.genStore(quad.result, currentProc);
           break;
         case '<=': 
           this.genOperand(quad.arg1, currentProc);
           this.genOperand(quad.arg2, currentProc);
           this.emit(PCodeF.OPR, 0, 13); 
+          this.genStore(quad.result, currentProc);
           break;
       }
     }
@@ -199,27 +211,43 @@ export class TargetCodeGenerator {
       this.instructions.push({ f, l, a });
   }
 
+  private genStore(target: string, currentProc: string) {
+      if (!target) return;
+      const dest = this.findSymbol(target, currentProc);
+      if (dest) {
+        this.emit(PCodeF.STO, dest.levelDiff, Number(dest.entry.addr));
+      } else if (target.startsWith('T')) {
+         // Handle Temp stores. Offset 20 + ID to stay above locals but (hopefully) below next frame
+         const tempId = parseInt(target.substring(1));
+         this.emit(PCodeF.STO, 0, 20 + tempId);
+      }
+  }
+
   private genOperand(arg: string, currentProc: string) {
       if(!arg) return;
       
       // If it's a number (LIT)
-      if(!isNaN(Number(arg))) {
-          this.emit(PCodeF.LIT, 0, Number(arg));
-          return;
-      } 
-      
-      // If it's a variable or constant (LOD or LIT)
-      const sym = this.findSymbol(arg, currentProc);
-      if(sym) {
-          if (sym.entry.kind === 'constant') {
-             this.emit(PCodeF.LIT, 0, Number(sym.entry.valLevel));
-          } else {
-             this.emit(PCodeF.LOD, sym.levelDiff, Number(sym.entry.addr));
-          }
+      if (!isNaN(parseFloat(arg))) {
+          this.emit(PCodeF.LIT, 0, parseFloat(arg));
           return;
       }
 
-      // If it's a Temp (T1, T2...), we assume it is already on the Stack Top.
-      // If it's not a Temp and not in Symbol Table, it's likely an error or a label.
+      // If it is a temporary (T1, T2...)
+      if (arg.startsWith('T')) {
+          const tempId = parseInt(arg.substring(1));
+          // Use same mapping strategy as in STO: Offset 20 + ID
+          this.emit(PCodeF.LOD, 0, 20 + tempId);
+          return;
+      }
+
+      // If it's a variable or constant
+      const sym = this.findSymbol(arg, currentProc);
+      if (sym) {
+          if (sym.entry.kind === 'constant') {
+              this.emit(PCodeF.LIT, 0, Number(sym.entry.valLevel));
+          } else if (sym.entry.kind === 'variable') {
+              this.emit(PCodeF.LOD, sym.levelDiff, Number(sym.entry.addr));
+          }
+      }
   }
 }
